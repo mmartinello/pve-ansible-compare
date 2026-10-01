@@ -639,51 +639,72 @@ def short_name(name: str) -> str:
     return name.split(".", 1)[0].lower()
 
 
-def names_match(guest_name: str, host_name: str, mode: str) -> bool:
-    """Tell whether a Proxmox guest name and an inventory host name refer to the same host.
+# Name match levels, from the strongest to the weakest
+MATCH_EXACT = 3   # same full name
+MATCH_PREFIX = 2  # the labels of one name are the leading labels of the other
+MATCH_SHORT = 1   # same first DNS label
+MATCH_NONE = 0
 
-    Modes:
-        * ``exact``: case-insensitive comparison of the full names;
-        * ``short``: comparison of the first DNS label only;
-        * ``auto``: full comparison when both names are FQDNs, short name
-          comparison when at least one of them is a short name.
+# Minimum match level accepted by each --match mode
+MATCH_MODE_MIN_LEVEL = {"exact": MATCH_EXACT, "prefix": MATCH_PREFIX,
+                        "short": MATCH_SHORT, "auto": MATCH_SHORT}
+
+
+def match_level(guest_name: str, host_name: str) -> int:
+    """Compute how strongly a Proxmox guest name matches an inventory host name.
+
+    The prefix level covers guests named with a partial FQDN, e.g. the guest
+    ``web1.dev`` and the inventory host ``web1.dev.example.com``.
 
     Args:
         guest_name: Name of the Proxmox guest.
         host_name: Name of the inventory host.
-        mode: Matching mode.
 
     Returns:
-        True if the names match.
+        One of ``MATCH_EXACT``, ``MATCH_PREFIX``, ``MATCH_SHORT``, ``MATCH_NONE``.
     """
-    a, b = guest_name.lower(), host_name.lower()
-    if mode == "exact":
-        return a == b
-    if mode == "short":
-        return short_name(a) == short_name(b)
-    # auto
-    if "." in a and "." in b:
-        return a == b
-    return short_name(a) == short_name(b)
+    a, b = guest_name.lower().split("."), host_name.lower().split(".")
+    if a == b:
+        return MATCH_EXACT
+    shortest = min(len(a), len(b))
+    if a[:shortest] == b[:shortest]:
+        return MATCH_PREFIX
+    if a[0] == b[0]:
+        return MATCH_SHORT
+    return MATCH_NONE
 
 
 def find_matches(name: str, inventories: list[Inventory], mode: str) -> list[Match]:
-    """Find every inventory host matching ``name`` in the given inventories.
+    """Find the inventory hosts matching ``name`` in the given inventories.
+
+    Modes:
+        * ``exact``: case-insensitive comparison of the full names;
+        * ``prefix``: full names, or one name is a leading part of the other
+          (``web1.dev`` matches ``web1.dev.example.com``);
+        * ``short``: comparison of the first DNS label only;
+        * ``auto``: like ``short``, but only the strongest match level found
+          is kept (exact, then prefix, then short name), so that ``web1.dev``
+          matches ``web1.dev.example.com`` and not ``web1.prod.example.com``.
 
     Args:
         name: Guest name.
         inventories: Inventories to search.
-        mode: Matching mode (see :func:`names_match`).
+        mode: Matching mode.
 
     Returns:
         The list of matches (possibly empty).
     """
-    return [
-        Match(inventory=inv, host=host)
+    min_level = MATCH_MODE_MIN_LEVEL[mode]
+    scored = [
+        (level, Match(inventory=inv, host=host))
         for inv in inventories
         for host in inv.hosts.values()
-        if names_match(name, host.name, mode)
+        if (level := match_level(name, host.name)) >= min_level
     ]
+    if mode == "auto" and scored:
+        best = max(level for level, _ in scored)
+        scored = [item for item in scored if item[0] == best]
+    return [match for _, match in scored]
 
 
 def matches_any(name: str, patterns: list[str]) -> bool:
@@ -796,8 +817,8 @@ def find_orphans(inventories: list[Inventory], cluster_names: list[str], mode: s
     """Find inventory hosts that do not correspond to any cluster resource.
 
     Every guest and node of the cluster is considered, including the ones
-    excluded from the check: a host is orphan only if nothing on the cluster
-    matches it.
+    excluded from the check: a host is orphan only if it is not matched by
+    anything on the cluster, using the same rules as the guest check.
 
     Args:
         inventories: Parsed inventories.
@@ -808,12 +829,18 @@ def find_orphans(inventories: list[Inventory], cluster_names: list[str], mode: s
     Returns:
         The orphan hosts with their inventory.
     """
+    # Inventory hosts matched by at least one cluster resource
+    matched: set[tuple[Path, str]] = {
+        (m.inventory.path, m.host.name)
+        for name in cluster_names
+        for m in find_matches(name, inventories, mode)
+    }
     orphans: list[Match] = []
     for inv in inventories:
         for host in inv.hosts.values():
             if exclude and matches_any(host.name, exclude):
                 continue
-            if not any(names_match(name, host.name, mode) for name in cluster_names):
+            if (inv.path, host.name) not in matched:
                 orphans.append(Match(inventory=inv, host=host))
     return orphans
 
@@ -1128,9 +1155,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="exclude guests whose name matches the glob pattern (repeatable)")
     chk.add_argument("--exclude-tag", action="append", default=[], metavar="TAG",
                      help="exclude guests having this tag, e.g. no-ansible (repeatable)")
-    chk.add_argument("--match", choices=("auto", "exact", "short"), default="auto",
-                     help="name matching: exact = full name, short = first DNS label only, "
-                          "auto = full name if both are FQDNs, else short name (default: auto)")
+    chk.add_argument("--match", choices=("auto", "exact", "prefix", "short"), default="auto",
+                     help="name matching: exact = full name, prefix = full name or partial FQDN "
+                          "(web1.dev = web1.dev.example.com), short = first DNS label only, "
+                          "auto = best of exact/prefix/short (default: auto)")
     chk.add_argument("--orphans", action="store_true",
                      help="also report inventory hosts that do not exist on the cluster")
     chk.add_argument("--orphans-exclude", action="append", default=[], metavar="GLOB",

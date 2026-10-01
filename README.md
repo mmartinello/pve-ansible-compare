@@ -59,14 +59,23 @@ location is the name of its parent directory.
 
 ### Name matching
 
-Proxmox guest names are often short names (`app1`) while inventories use FQDNs
-(`app1.dev.site1.example.com`). The `--match` option controls the comparison:
+Proxmox guest names are often short names (`app1`) or partial FQDNs
+(`app1.dev`) while inventories use full FQDNs (`app1.dev.site1.example.com`).
+Names are compared case-insensitively, at three levels:
 
-| Mode    | Behaviour                                                                    |
-|---------|------------------------------------------------------------------------------|
-| `auto`  | (default) full name when both names are FQDNs, short name (first DNS label) otherwise |
-| `exact` | case-insensitive comparison of the full names                                |
-| `short` | comparison of the first DNS label only                                       |
+1. **exact**: same full name;
+2. **prefix**: one name is the leading part of the other, label by label
+   (`app1.dev` matches `app1.dev.site1.example.com`, not `app1.prod.site1.example.com`);
+3. **short**: same first DNS label (`app1.lan` matches `app1.dev.site1.example.com`).
+
+The `--match` option controls which levels are accepted:
+
+| Mode     | Behaviour                                                                   |
+|----------|-----------------------------------------------------------------------------|
+| `auto`   | (default) all levels, but only the strongest level found for a guest is kept: if `app1.dev` matches a host at the prefix level, short-name matches such as `app1.prod.site1.example.com` are ignored |
+| `exact`  | exact level only                                                            |
+| `prefix` | exact and prefix levels                                                     |
+| `short`  | all levels, every match is kept                                             |
 
 ### Result categories
 
@@ -161,7 +170,7 @@ is preferable for secrets:
 | `--skip-stopped`             | exclude guests that are not running                                     |
 | `--exclude GLOB`             | exclude guests (and nodes) by name, e.g. `'test-*'`; repeatable          |
 | `--exclude-tag TAG`          | exclude guests having this tag, e.g. `no-ansible`; repeatable            |
-| `--match {auto,exact,short}` | name matching mode (default `auto`)                                     |
+| `--match {auto,exact,prefix,short}` | name matching mode (default `auto`), see [Name matching](#name-matching) |
 | `--orphans`                  | also report inventory hosts not existing on the cluster                 |
 | `--orphans-exclude GLOB`     | ignore inventory hosts matching the glob in the orphan check (e.g. physical hosts, switches); repeatable |
 
