@@ -389,7 +389,8 @@ def _inventory_files(directory: Path) -> list[Path]:
     )
 
 
-def discover_inventories(path: Path, locations: list[str] | None) -> list[tuple[Path, str, str]]:
+def discover_inventories(path: Path, locations: list[str] | None,
+                         exclude: list[str] | None = None) -> list[tuple[Path, str, str]]:
     """Find inventory files and derive location and environment for each one.
 
     ``path`` can be:
@@ -402,18 +403,25 @@ def discover_inventories(path: Path, locations: list[str] | None) -> list[tuple[
     Args:
         path: Inventory file or directory.
         locations: Optional list of location names to keep (directory mode only).
+        exclude: Optional glob patterns of inventory files to skip (directory
+            mode only). Each pattern is matched against the file name
+            (``client.yml``), the environment name (``client``) and the
+            ``<location>/<file>`` path (``site1/client.yml``).
 
     Returns:
         A list of ``(file, location, env)`` tuples.
 
     Raises:
-        CompareError: If the path does not exist or no inventory is found.
+        CompareError: If the path does not exist, no inventory is found or
+            exclusions are requested for a single inventory file.
     """
     if not path.exists():
         raise CompareError(f"inventory path {path} does not exist")
 
     found: list[tuple[Path, str, str]] = []
     if path.is_file():
+        if exclude:
+            raise CompareError("--exclude-inventory can only be used with an inventory directory")
         found.append((path, path.resolve().parent.name, path.stem.lower()))
     else:
         # Files placed directly in the given directory: it is a location dir
@@ -430,8 +438,16 @@ def discover_inventories(path: Path, locations: list[str] | None) -> list[tuple[
             wanted = set(locations)
             found = [item for item in found if item[1] in wanted]
 
+        if exclude:
+            found = [
+                item for item in found
+                if not any(matches_any(name, exclude)
+                           for name in (item[0].name, item[2], f"{item[1]}/{item[0].name}"))
+            ]
+
     if not found:
-        raise CompareError(f"no inventory file found in {path}")
+        filtered = " after --location/--exclude-inventory filters" if (locations or exclude) else ""
+        raise CompareError(f"no inventory file found in {path}{filtered}")
     return found
 
 
@@ -1131,6 +1147,10 @@ def build_parser() -> argparse.ArgumentParser:
     inv.add_argument("-l", "--location", action="append", default=[],
                      help="only use inventories of this location (repeatable); "
                           "recommended when the root holds several clusters")
+    inv.add_argument("--exclude-inventory", action="append", default=[], metavar="GLOB",
+                     help="skip inventory files matching the glob, checked against the file "
+                          "name (client.yml), the environment (client) and <location>/<file> "
+                          "(site1/client.yml); directory mode only (repeatable)")
 
     chk = parser.add_argument_group("Check options")
     chk.add_argument("--env-tag-format", default="env.{env}",
@@ -1192,7 +1212,8 @@ def run(args: argparse.Namespace) -> int:
 
     # Load inventories
     inventories = [parse_inventory(path, location, env)
-                   for path, location, env in discover_inventories(args.inventory, args.location)]
+                   for path, location, env in discover_inventories(args.inventory, args.location,
+                                                             args.exclude_inventory)]
 
     # Load cluster resources
     if args.resources_file:

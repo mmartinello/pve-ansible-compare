@@ -156,6 +156,7 @@ is preferable for secrets:
 |------------------------|------------------------------------------------------------------------------|
 | `-i`, `--inventory PATH` | inventories root (`<root>/<location>/<env>.yml`), a location directory or a single inventory file (required) |
 | `-l`, `--location NAME`  | only use inventories of this location; repeatable. Recommended when the root contains inventories of several clusters (a warning is printed otherwise) |
+| `--exclude-inventory GLOB` | skip inventory files matching the glob; repeatable. The pattern is checked against the file name (`client.yml`), the environment (`client`) and `<location>/<file>` (`site1/client.yml`). Only allowed when `-i` is a directory |
 
 **Check options**
 
@@ -210,6 +211,12 @@ ignoring network devices and printers:
 ```sh
 ./pve_ansible_compare.py -i ~/ansible/project/inventories -l site1 \
     --include-nodes hypervisors --orphans --orphans-exclude 'sw-*' --orphans-exclude 'printer-*'
+```
+
+Skip the inventories that do not describe cluster guests (e.g. desktop clients):
+
+```sh
+./pve_ansible_compare.py -i ~/ansible/project/inventories -l site1 --exclude-inventory client
 ```
 
 Check a single inventory file, assigning `dev` to untagged guests:
