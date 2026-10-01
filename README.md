@@ -82,6 +82,7 @@ The `--match` option controls which levels are accepted:
 | Label  | Meaning                                                                                |
 |--------|----------------------------------------------------------------------------------------|
 | `OK`   | the guest is declared in an inventory of its environment                               |
+| `WARN` | the guest is declared in an inventory of its environment, but **also** in inventories of other environments |
 | `ENV`  | the guest is declared only in inventories of other environments                        |
 | `MISS` | the guest is not declared in any inventory                                             |
 | `ORPH` | (with `--orphans`) inventory host matching no guest nor node of the cluster            |
@@ -90,6 +91,10 @@ The `--match` option controls which levels are accepted:
 A note is added when the environment of a guest has no inventory file at all,
 or when a guest has more than one environment tag (in that case it is `OK` if
 it is found in the inventory of any of them).
+
+With `--match short` every name collision is kept, so guests sharing the first
+DNS label (e.g. `web1.dev` and `web1.prod`) are reported as `WARN`; the default
+`auto` mode avoids this.
 
 ## Requirements
 
@@ -180,7 +185,7 @@ is preferable for secrets:
 | Option                 | Description                                                       |
 |------------------------|-------------------------------------------------------------------|
 | `--format {text,json}` | output format (default `text`)                                    |
-| `--hide-ok`            | do not list guests found in the right inventory                   |
+| `--hide-ok`            | do not list guests found in the right inventory (`WARN` guests are still listed) |
 | `--hide-excluded`      | do not list excluded guests                                       |
 | `--direct-groups-only` | do not show inherited groups                                      |
 | `--no-color`           | disable colors (also disabled when `NO_COLOR` is set or output is not a terminal) |
@@ -189,8 +194,8 @@ is preferable for secrets:
 
 | Code | Meaning                                                                  |
 |------|--------------------------------------------------------------------------|
-| `0`  | every checked guest is in the right inventory (and no orphans, if requested) |
-| `1`  | discrepancies found                                                      |
+| `0`  | every checked guest is `OK` (and no orphans, if requested)               |
+| `1`  | discrepancies found: `WARN`, `ENV`, `MISS` or `ORPH` entries             |
 | `2`  | error (connection, invalid inventory, invalid options)                   |
 
 This makes the script usable in CI or monitoring checks.
@@ -249,10 +254,16 @@ Proxmox source: pve1.site1.example.com:8006
 Inventories:    site1/dev.yml, site1/staging.yml
 
 === Guests found in the inventory of their environment (2) ===
-  OK   web1 (vmid 101, qemu, node pve1, running, env dev)
-      site1/dev.yml: web1.dev.site1.example.com [webservers, (servers)]
   OK   db1.dev.site1.example.com (vmid 102, qemu, node pve1, running, env dev)
       site1/dev.yml: db1.dev.site1.example.com [databases, (servers)]
+  OK   web1 (vmid 101, qemu, node pve1, running, env dev)
+      site1/dev.yml: web1.dev.site1.example.com [webservers, (servers)]
+
+=== Guests found in the inventory of their environment, but also in other environments (1) ===
+  WARN mail1.site1 (vmid 106, qemu, node pve1, running, env staging)
+      site1/staging.yml: mail1.site1.example.com [mail, (servers)]
+      warning: also declared in inventories of other environments:
+      site1/dev.yml: mail1.site1.example.com [mail]
 
 === Guests found only in inventories of other environments (1) ===
   ENV  app1 (vmid 103, lxc, node pve2, running, env prod)
@@ -267,9 +278,10 @@ Inventories:    site1/dev.yml, site1/staging.yml
   SKIP tpl-debian (vmid 9000, qemu, node pve2, stopped): template
 
 === Summary ===
-  Checked guests:             4
-  Found in right inventory:   2
-  Found in other env only:    1
-  Not in any inventory:       1
-  Excluded guests:            2
+  Checked guests:              5
+  Found in right inventory:    2
+  Also in other env (warning): 1
+  Found in other env only:     1
+  Not in any inventory:        1
+  Excluded guests:             2
 ```

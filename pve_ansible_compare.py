@@ -52,6 +52,7 @@ EXIT_ERROR = 2
 
 # Result statuses for a Proxmox guest
 STATUS_OK = "ok"                # found in an inventory of its environment
+STATUS_WARNING = "warning"      # found in its environment, but also in other environments
 STATUS_WRONG_ENV = "wrong-env"  # found only in inventories of other environments
 STATUS_MISSING = "missing"      # not found in any inventory
 
@@ -146,7 +147,8 @@ class GuestResult:
 
     Attributes:
         guest: The checked guest.
-        status: One of ``STATUS_OK``, ``STATUS_WRONG_ENV``, ``STATUS_MISSING``.
+        status: One of ``STATUS_OK``, ``STATUS_WARNING``, ``STATUS_WRONG_ENV``,
+            ``STATUS_MISSING``.
         expected: Matches in inventories of the guest's environment.
         others: Matches in inventories of other environments.
         notes: Additional remarks (e.g. no inventory file for the environment).
@@ -184,7 +186,7 @@ class Report:
 
     @property
     def has_discrepancies(self) -> bool:
-        """Return True if any guest is missing/misplaced or any orphan was found."""
+        """Return True if any guest is not OK (warning, misplaced, missing) or any orphan was found."""
         if any(r.status != STATUS_OK for r in self.results):
             return True
         return bool(self.orphans)
@@ -811,7 +813,10 @@ def compare(checked: list[Guest], inventories: list[Inventory], mode: str) -> li
         matches = find_matches(guest.name, inventories, mode)
         expected = [m for m in matches if m.inventory.env in guest.envs]
         others = [m for m in matches if m.inventory.env not in guest.envs]
-        if expected:
+        if expected and others:
+            # Declared where expected, but duplicated in other environments
+            status = STATUS_WARNING
+        elif expected:
             status = STATUS_OK
         elif others:
             status = STATUS_WRONG_ENV
@@ -967,6 +972,7 @@ def print_text_report(report: Report, args: argparse.Namespace) -> None:
         print(c.yellow(f"WARNING: {warning}"))
 
     ok = report.by_status(STATUS_OK)
+    warn = report.by_status(STATUS_WARNING)
     wrong = report.by_status(STATUS_WRONG_ENV)
     missing = report.by_status(STATUS_MISSING)
 
@@ -975,10 +981,17 @@ def print_text_report(report: Report, args: argparse.Namespace) -> None:
         for r in ok:
             print("  " + c.green("OK   ") + describe_guest(r.guest))
             print_matches(r.expected, c.green)
-            if r.others:
-                print(c.dim("      also in other environments:"))
-                print_matches(r.others, c.dim)
             print_notes(r)
+
+    # Warnings are always shown, even with --hide-ok
+    section("Guests found in the inventory of their environment, "
+            "but also in other environments", len(warn))
+    for r in warn:
+        print("  " + c.yellow("WARN ") + describe_guest(r.guest))
+        print_matches(r.expected, c.green)
+        print(c.yellow("      warning: also declared in inventories of other environments:"))
+        print_matches(r.others, c.yellow)
+        print_notes(r)
 
     section("Guests found only in inventories of other environments", len(wrong))
     for r in wrong:
@@ -1005,13 +1018,20 @@ def print_text_report(report: Report, args: argparse.Namespace) -> None:
     # Final summary
     print()
     print(c.bold("=== Summary ==="))
-    print(f"  Checked guests:             {len(report.results)}")
-    print(f"  {c.green('Found in right inventory:')}   {len(ok)}")
-    print(f"  {c.yellow('Found in other env only:')}    {len(wrong)}")
-    print(f"  {c.red('Not in any inventory:')}       {len(missing)}")
+    rows = [
+        ("Checked guests:", len(report.results), str),
+        ("Found in right inventory:", len(ok), c.green),
+        ("Also in other env (warning):", len(warn), c.yellow),
+        ("Found in other env only:", len(wrong), c.yellow),
+        ("Not in any inventory:", len(missing), c.red),
+    ]
     if report.orphans is not None:
-        print(f"  {c.red('Orphan inventory hosts:')}     {len(report.orphans)}")
-    print(f"  Excluded guests:            {len(report.excluded)}")
+        rows.append(("Orphan inventory hosts:", len(report.orphans), c.red))
+    rows.append(("Excluded guests:", len(report.excluded), str))
+    # Pad before coloring, so that ANSI codes do not break the alignment
+    width = max(len(label) for label, _, _ in rows) + 1
+    for label, count, color in rows:
+        print(f"  {color(label.ljust(width))}{count}")
 
 
 def report_to_dict(report: Report) -> dict[str, Any]:
@@ -1061,6 +1081,7 @@ def report_to_dict(report: Report) -> dict[str, Any]:
         "summary": {
             "checked": len(report.results),
             STATUS_OK: len(report.by_status(STATUS_OK)),
+            STATUS_WARNING: len(report.by_status(STATUS_WARNING)),
             STATUS_WRONG_ENV: len(report.by_status(STATUS_WRONG_ENV)),
             STATUS_MISSING: len(report.by_status(STATUS_MISSING)),
             "excluded": len(report.excluded),
