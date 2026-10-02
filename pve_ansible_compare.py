@@ -692,37 +692,74 @@ def match_level(guest_name: str, host_name: str) -> int:
     return MATCH_NONE
 
 
-def find_matches(name: str, inventories: list[Inventory], mode: str) -> list[Match]:
-    """Find the inventory hosts matching ``name`` in the given inventories.
+class NameMatcher:
+    """Find the inventory hosts matching the name of a cluster resource.
 
     Modes:
         * ``exact``: case-insensitive comparison of the full names;
         * ``prefix``: full names, or one name is a leading part of the other
           (``web1.dev`` matches ``web1.dev.example.com``);
-        * ``short``: comparison of the first DNS label only;
-        * ``auto``: like ``short``, but only the strongest match level found
-          is kept (exact, then prefix, then short name), so that ``web1.dev``
-          matches ``web1.dev.example.com`` and not ``web1.prod.example.com``.
+        * ``short``: comparison of the first DNS label only, every match is kept;
+        * ``auto``: like ``short``, with two refinements:
 
-    Args:
-        name: Guest name.
-        inventories: Inventories to search.
-        mode: Matching mode.
-
-    Returns:
-        The list of matches (possibly empty).
+          1. an inventory host is only matched by the cluster resources that
+             match it at the strongest level: ``web1.dev.example.com`` matched
+             at the prefix level by the guest ``web1.dev`` is not also given to
+             the guest ``web1.prod``, which matches it at the short level only;
+          2. for each guest, only the strongest level among its remaining
+             matches is kept (exact, then prefix, then short name).
     """
-    min_level = MATCH_MODE_MIN_LEVEL[mode]
-    scored = [
-        (level, Match(inventory=inv, host=host))
-        for inv in inventories
-        for host in inv.hosts.values()
-        if (level := match_level(name, host.name)) >= min_level
-    ]
-    if mode == "auto" and scored:
-        best = max(level for level, _ in scored)
-        scored = [item for item in scored if item[0] == best]
-    return [match for _, match in scored]
+
+    def __init__(self, inventories: list[Inventory], mode: str, cluster_names: list[str]) -> None:
+        """Initialize the matcher.
+
+        Args:
+            inventories: Inventories to search.
+            mode: Matching mode.
+            cluster_names: Names of every guest and node of the cluster
+                (excluded ones too), used in ``auto`` mode to decide which
+                resource each inventory host belongs to.
+        """
+        self.inventories = inventories
+        self.mode = mode
+        self.min_level = MATCH_MODE_MIN_LEVEL[mode]
+        # Strongest level at which each inventory host is matched by any resource
+        self.host_best: dict[tuple[Path, str], int] = {}
+        if mode == "auto":
+            for name in cluster_names:
+                for level, match in self._scored(name):
+                    key = (match.inventory.path, match.host.name)
+                    self.host_best[key] = max(self.host_best.get(key, MATCH_NONE), level)
+
+    def _scored(self, name: str) -> list[tuple[int, Match]]:
+        """Return every inventory host matching ``name`` at an accepted level, with the level."""
+        return [
+            (level, Match(inventory=inv, host=host))
+            for inv in self.inventories
+            for host in inv.hosts.values()
+            if (level := match_level(name, host.name)) >= self.min_level
+        ]
+
+    def find(self, name: str) -> list[Match]:
+        """Find the inventory hosts matching ``name``.
+
+        Args:
+            name: Name of a guest or node.
+
+        Returns:
+            The list of matches (possibly empty).
+        """
+        scored = self._scored(name)
+        if self.mode == "auto":
+            # Drop hosts that another resource matches at a stronger level
+            scored = [
+                (level, match) for level, match in scored
+                if level >= self.host_best.get((match.inventory.path, match.host.name), MATCH_NONE)
+            ]
+            if scored:
+                best = max(level for level, _ in scored)
+                scored = [item for item in scored if item[0] == best]
+        return [match for _, match in scored]
 
 
 def matches_any(name: str, patterns: list[str]) -> bool:
@@ -796,13 +833,14 @@ def select_guests(guests: list[Guest], nodes: list[Guest],
     return checked, excluded
 
 
-def compare(checked: list[Guest], inventories: list[Inventory], mode: str) -> list[GuestResult]:
+def compare(checked: list[Guest], inventories: list[Inventory],
+            matcher: NameMatcher) -> list[GuestResult]:
     """Check every guest against the inventories.
 
     Args:
         checked: Guests to check (with resolved environments).
         inventories: Parsed inventories.
-        mode: Name matching mode.
+        matcher: Name matcher built on the same inventories.
 
     Returns:
         One result per guest.
@@ -810,7 +848,7 @@ def compare(checked: list[Guest], inventories: list[Inventory], mode: str) -> li
     known_envs = {inv.env for inv in inventories}
     results: list[GuestResult] = []
     for guest in checked:
-        matches = find_matches(guest.name, inventories, mode)
+        matches = matcher.find(guest.name)
         expected = [m for m in matches if m.inventory.env in guest.envs]
         others = [m for m in matches if m.inventory.env not in guest.envs]
         if expected and others:
@@ -833,7 +871,7 @@ def compare(checked: list[Guest], inventories: list[Inventory], mode: str) -> li
     return results
 
 
-def find_orphans(inventories: list[Inventory], cluster_names: list[str], mode: str,
+def find_orphans(inventories: list[Inventory], cluster_names: list[str], matcher: NameMatcher,
                  exclude: list[str]) -> list[Match]:
     """Find inventory hosts that do not correspond to any cluster resource.
 
@@ -844,7 +882,7 @@ def find_orphans(inventories: list[Inventory], cluster_names: list[str], mode: s
     Args:
         inventories: Parsed inventories.
         cluster_names: Names of every guest and node of the cluster.
-        mode: Name matching mode.
+        matcher: Name matcher built on the same inventories.
         exclude: Glob patterns of inventory hosts to ignore.
 
     Returns:
@@ -854,7 +892,7 @@ def find_orphans(inventories: list[Inventory], cluster_names: list[str], mode: s
     matched: set[tuple[Path, str]] = {
         (m.inventory.path, m.host.name)
         for name in cluster_names
-        for m in find_matches(name, inventories, mode)
+        for m in matcher.find(name)
     }
     orphans: list[Match] = []
     for inv in inventories:
@@ -1252,12 +1290,14 @@ def run(args: argparse.Namespace) -> int:
                         "consider --location to restrict the check to this cluster")
 
     checked, excluded = select_guests(guests, nodes, args)
-    results = compare(checked, inventories, args.match)
+    # Every guest and node takes part in the matching, excluded ones too
+    cluster_names = [g.name for g in guests] + [n.name for n in nodes]
+    matcher = NameMatcher(inventories, args.match, cluster_names)
+    results = compare(checked, inventories, matcher)
 
     orphans = None
     if args.orphans:
-        cluster_names = [g.name for g in guests] + [n.name for n in nodes]
-        orphans = find_orphans(inventories, cluster_names, args.match, args.orphans_exclude)
+        orphans = find_orphans(inventories, cluster_names, matcher, args.orphans_exclude)
         orphans.sort(key=lambda m: (m.inventory.label, m.host.name))
 
     results.sort(key=lambda r: r.guest.name.lower())

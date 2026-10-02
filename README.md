@@ -72,10 +72,23 @@ The `--match` option controls which levels are accepted:
 
 | Mode     | Behaviour                                                                   |
 |----------|-----------------------------------------------------------------------------|
-| `auto`   | (default) all levels, but only the strongest level found for a guest is kept: if `app1.dev` matches a host at the prefix level, short-name matches such as `app1.prod.site1.example.com` are ignored |
+| `auto`   | (default) all levels, with the refinements described below                  |
 | `exact`  | exact level only                                                            |
 | `prefix` | exact and prefix levels                                                     |
 | `short`  | all levels, every match is kept                                             |
+
+In `auto` mode, every guest and node of the cluster (excluded ones too) takes
+part in the matching, and:
+
+1. an inventory host belongs only to the cluster resources matching it at the
+   strongest level. With the guests `app1.prod` and `app1.test` and the
+   inventory hosts `app1.site1.example.com` (prod) and
+   `app1.test.site1.example.com` (test), the latter matches `app1.test` at the
+   prefix level, so it is not also given to `app1.prod`, which matches it at
+   the short level only;
+2. for each guest, only the strongest level among its remaining matches is
+   kept: if `app1.dev` matches a host at the prefix level, short-name matches
+   such as `app1.prod.site1.example.com` are ignored.
 
 ### Result categories
 
